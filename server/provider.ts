@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
+import path from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import type {
@@ -7,7 +8,17 @@ import type {
   ProviderConnection,
   ProviderEvent,
   ProviderInput,
+  ProviderLaunch,
 } from "@getpaseo/plugin/server/provider";
+import { BASE_PROVIDER_ID, BASE_PROVIDER_LABEL } from "../shared/accounts";
+import {
+  APP_DATA_DIR_NAME,
+  accountAcpCommand,
+  buildAccountEnv,
+  isAccountSignedIn,
+  prepareAccountProfile,
+  type AccountProfile,
+} from "./accounts";
 import {
   createTransport,
   type Context,
@@ -16,24 +27,71 @@ import {
 import { vendor, options } from "./vendor";
 import { defaults, type Limits } from "./watch";
 
+function applyAccountLaunch(
+  launch: ProviderLaunch,
+  account: AccountProfile | undefined,
+  userHome?: string,
+): ProviderLaunch {
+  if (!account) return launch;
+  prepareAccountProfile(account.profileDir, userHome);
+  const resolvedProfile = path.resolve(account.profileDir);
+  const args = [...launch.args];
+  const acpIndex = args.indexOf("acp");
+  if (acpIndex >= 0 && !args.includes("--gemini-dir") && !args.includes("--gemini_dir")) {
+    args.splice(
+      acpIndex + 1,
+      0,
+      "--gemini-dir",
+      resolvedProfile,
+      "--app-data-dir",
+      APP_DATA_DIR_NAME,
+    );
+  }
+  return {
+    ...launch,
+    args,
+    env: buildAccountEnv(launch.env, resolvedProfile),
+  };
+}
+
 export function provider(
   testOptions: {
     limits?: Limits;
     closeTimeoutMs?: number;
     statusTimeoutMs?: number;
+    account?: AccountProfile;
+    userHome?: string;
   } = {},
 ): ProviderRegistration {
+  const account = testOptions.account;
+  const providerId = account?.providerId ?? BASE_PROVIDER_ID;
+  const providerLabel = account?.providerLabel ?? BASE_PROVIDER_LABEL;
   return {
-    id: "better-paseo-antigravity",
-    label: "Better Paseo Antigravity",
+    id: providerId,
+    label: providerLabel,
     icon: "icon.svg",
-    description: "复用官方 CLI 登录和配置；会话进度提示与可控取消。",
-    command: ["agy", "acp", "--disable-telemetry"],
+    description: account
+      ? `独立账号（${account.label}）；使用官方 agy acp 与独立 GEMINI_HOME，不修改系统 Keychain 或 HOME。`
+      : "复用官方 CLI 登录和配置；会话进度提示与可控取消。",
+    command: account
+      ? accountAcpCommand(account.profileDir)
+      : ["agy", "acp", "--disable-telemetry"],
     docsUrl: "https://paseo.sh/docs/supported-providers/antigravity",
+    ...(account
+      ? {
+          async getCatalogCacheKey() {
+            const signedIn = isAccountSignedIn(account.profileDir) ? "signed-in" : "signed-out";
+            return `${providerId}:${path.resolve(account.profileDir)}:${signedIn}`;
+          },
+        }
+      : {}),
     installation: {
       installUrl: "https://antigravity.google/docs/getting-started?tab=cli",
       async inspect({ launch, signal }) {
         if (!launch?.resolved) return { status: "not_installed" };
+        const effectiveEnv = account
+          ? buildAccountEnv(launch.env, account.profileDir)
+          : launch.env;
         const prefix = launch.args.indexOf("acp");
         const { stdout } = await execCommand(
           launch.command,
@@ -41,7 +99,7 @@ export function provider(
             ...(prefix < 0 ? launch.args : launch.args.slice(0, prefix)),
             "--version",
           ],
-          { env: launch.env, signal, timeout: 10000, maxBuffer: 8192 },
+          { env: effectiveEnv, signal, timeout: 10000, maxBuffer: 8192 },
         );
         return {
           status: "installed",
@@ -49,15 +107,24 @@ export function provider(
         };
       },
     },
-    async status({ launch }) {
-      if (!launch)
+    async status({ launch: rawLaunch }) {
+      if (!rawLaunch)
         return { available: false, diagnostic: "未找到官方 agy CLI。" };
+      if (account && !isAccountSignedIn(account.profileDir)) {
+        return {
+          available: false,
+          diagnostic: `账号「${account.label}」尚未登录。请在「设置 → 插件 → Better Paseo Antigravity」中完成官方授权。`,
+        };
+      }
+      const launch = applyAccountLaunch(rawLaunch, account, testOptions.userHome);
       const ssh = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"].find(
         (key) => launch.env[key],
       );
-      const signIn = ssh
-        ? `SSH 环境（${ssh}）：CLI 的登录来源可能与本机终端不同。`
-        : "非 SSH 环境：沿用 CLI 原有登录来源。";
+      const signIn = account
+        ? `独立账号配置：${account.label}（GEMINI_HOME 隔离文件存储）`
+        : ssh
+          ? `SSH 环境（${ssh}）：CLI 的登录来源可能与本机终端不同。`
+          : "非 SSH 环境：沿用 CLI 原有登录来源。";
       const deadline =
         Date.now() +
         (testOptions.statusTimeoutMs ?? options.startupTimeoutMs ?? 95000);
@@ -87,8 +154,8 @@ export function provider(
         const probes = new Set<OwnedTransport>();
         try {
           const probe = runAcpProvider({
-            id: "better-paseo-antigravity",
-            label: "Better Paseo Antigravity",
+            id: providerId,
+            label: providerLabel,
             acpOptions: { startupTimeoutMs: remaining() },
             connector: () => {
               const t = createTransport(
@@ -131,7 +198,7 @@ export function provider(
     },
     async connect(request): Promise<ProviderConnection> {
       if (!request.launch) throw new Error("缺少官方 CLI 启动配置。");
-      const launch = request.launch;
+      const launch = applyAccountLaunch(request.launch, account, testOptions.userHome);
       const scope = new AsyncLocalStorage<Context>();
       const owned = new Set<OwnedTransport>();
       const listeners = new Set<(e: ProviderEvent) => void>();
@@ -143,8 +210,8 @@ export function provider(
         if (!closed) for (const l of listeners) l(e);
       };
       const shim = runAcpProvider({
-        id: "better-paseo-antigravity",
-        label: "Better Paseo Antigravity",
+        id: providerId,
+        label: providerLabel,
         acpOptions: options,
         transformers: [vendor],
         connector: () => {

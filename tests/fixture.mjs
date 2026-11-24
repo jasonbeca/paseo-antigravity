@@ -1,5 +1,6 @@
 import readline from "node:readline";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 const send = (m) =>
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
 const update = (u) =>
@@ -16,6 +17,69 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 if (process.argv.includes("/usage")) {
+  if (process.env.SCENARIO === "strict-home-usage") {
+    // Mirror real `agy -p /usage`: ignores GEMINI_HOME and reads token strictly from $HOME/.gemini/antigravity-cli.
+    if (
+      process.env.XDG_CONFIG_HOME ||
+      process.env.ANTIGRAVITY_HOME ||
+      process.env.ANTIGRAVITY_APP_DATA_DIR ||
+      process.env.ANTIGRAVITY_LS_ADDRESS
+    ) {
+      process.stderr.write("unexpected leaked env var\n");
+      process.exit(2);
+    }
+    const tokenPath = path.join(
+      process.env.HOME || "",
+      ".gemini",
+      "antigravity-cli",
+      "antigravity-oauth-token",
+    );
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(tokenPath, "utf8"));
+    } catch {
+      process.stderr.write("authentication failed: token not found under HOME/.gemini\n");
+      process.exit(1);
+    }
+    const remaining = Number(parsed?.token?.remaining_fraction ?? 0.5);
+    console.log(
+      JSON.stringify({
+        status: "SUCCESS",
+        command: {
+          name: "usage",
+          data: {
+            groups: [
+              {
+                name: "Gemini Models",
+                buckets: [
+                  {
+                    id: "gemini-weekly",
+                    name: "Weekly Limit Remaining",
+                    window: "weekly",
+                    remaining_fraction: remaining,
+                    reset_time: "2026-12-01T00:00:00Z",
+                  },
+                ],
+              },
+              {
+                name: "Claude and GPT models",
+                buckets: [
+                  {
+                    id: "3p-weekly",
+                    name: "Weekly Limit Remaining",
+                    window: "weekly",
+                    remaining_fraction: 1,
+                    reset_time: "1970-01-01T00:00:00Z",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+    );
+    process.exit(0);
+  }
   console.log(
     JSON.stringify({
       status: "SUCCESS",

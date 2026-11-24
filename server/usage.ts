@@ -1,4 +1,5 @@
-import { homedir } from "node:os";
+import { mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { execCommand } from "@getpaseo/plugin/server";
@@ -10,6 +11,13 @@ import {
   windowFromUsedPct,
   type UsageSourceRegistration,
 } from "@getpaseo/plugin/server/usage";
+import { BASE_PROVIDER_ID, BASE_PROVIDER_LABEL } from "../shared/accounts";
+import {
+  APP_DATA_DIR_NAME,
+  buildAccountEnv,
+  isAccountSignedIn,
+  type AccountProfile,
+} from "./accounts";
 
 const input = z.object({ launch: z.string() }).strict();
 const response = z.object({
@@ -43,8 +51,10 @@ const response = z.object({
 function accountKey(env: ProviderLaunch["env"]): string {
   return hashAccountKey(
     path.resolve(
-      env.ANTIGRAVITY_HOME ??
-        path.join(env.HOME ?? homedir(), ".gemini", "antigravity-cli"),
+      env.GEMINI_HOME
+        ? path.join(env.GEMINI_HOME, APP_DATA_DIR_NAME)
+        : (env.ANTIGRAVITY_HOME ??
+            path.join(env.HOME ?? homedir(), ".gemini", APP_DATA_DIR_NAME)),
     ),
   );
 }
@@ -85,52 +95,144 @@ function formatShortLabel(groupLabel: string, window: string): string {
   return groupLabel ? `${groupLabel} ${period}` : period;
 }
 
+function normalizeResetTime(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  return value;
+}
+
+const ISOLATED_USAGE_STRIPPED_ENV_KEYS = new Set([
+  "XDG_CONFIG_HOME",
+  "ANTIGRAVITY_HOME",
+  "ANTIGRAVITY_APP_DATA_DIR",
+  "ANTIGRAVITY_LS_ADDRESS",
+  "ANTIGRAVITY_AGENT",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "ANTIGRAVITY_TRAJECTORY_ID",
+]);
+
+/**
+ * `agy -p /usage` (CLI print mode) ignores `GEMINI_HOME` and does not accept
+ * `--gemini-dir`; it always reads credentials from `<HOME>/.gemini/antigravity-cli`.
+ * Run print-mode usage inside an ephemeral synthetic HOME whose `.gemini` points
+ * to the account's isolated profile directory so every account reports its own quota.
+ */
+async function withIsolatedUsageHome<T>(
+  baseEnv: Readonly<Record<string, string>>,
+  profileDir: string,
+  fn: (env: Record<string, string>) => Promise<T>,
+): Promise<T> {
+  const tempHome = mkdtempSync(path.join(tmpdir(), "paseo-agy-usage-"));
+  const geminiLink = path.join(tempHome, ".gemini");
+  try {
+    symlinkSync(
+      path.resolve(profileDir),
+      geminiLink,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(baseEnv)) {
+      if (ISOLATED_USAGE_STRIPPED_ENV_KEYS.has(key.toUpperCase())) continue;
+      env[key] = value;
+    }
+    env.HOME = tempHome;
+    if (process.platform === "win32") {
+      env.USERPROFILE = tempHome;
+    }
+    return await fn(env);
+  } finally {
+    try {
+      unlinkSync(geminiLink);
+    } catch {
+      /* ignore if symlink was never created */
+    }
+    try {
+      rmSync(tempHome, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+}
+
 export class Usage {
   private readonly launches = new Map<string, ProviderLaunch>();
+  private readonly account?: AccountProfile;
+
+  constructor(account?: AccountProfile) {
+    this.account = account;
+  }
 
   registration(): UsageSourceRegistration {
+    const providerId = this.account?.providerId ?? BASE_PROVIDER_ID;
+    const providerLabel = this.account?.providerLabel ?? BASE_PROVIDER_LABEL;
     return {
-      id: "better-paseo-antigravity",
-      label: "Better Paseo Antigravity",
+      id: providerId,
+      label: providerLabel,
       icon: "icon.svg",
       input,
-      provider: "better-paseo-antigravity",
+      provider: providerId,
       discover: async (scope) => {
-        if (scope.kind === "session" && scope.provider !== "better-paseo-antigravity")
+        if (scope.kind === "session" && scope.provider !== providerId)
           return [];
         if (!scope.launch) return [];
-        const launch = scope.launch;
+        if (this.account && !isAccountSignedIn(this.account.profileDir))
+          return [];
+        const launch: ProviderLaunch = this.account
+          ? {
+              ...scope.launch,
+              env: buildAccountEnv(scope.launch.env, this.account.profileDir),
+            }
+          : scope.launch;
         const key = accountKey(launch.env);
         const locator = hashAccountKey(JSON.stringify(launch));
         this.launches.set(locator, launch);
-        return [{ key, input: { launch: locator } }];
+        return [
+          {
+            key,
+            provider: providerId,
+            ...(this.account ? { label: this.account.label } : {}),
+            input: { launch: locator },
+          },
+        ];
       },
       fetch: async (value) => {
         const { launch: locator } = input.parse(value);
         const launch = this.launches.get(locator);
         if (!launch) throw new Error("Antigravity launch no longer exists");
+        if (this.account && !isAccountSignedIn(this.account.profileDir)) {
+          return unavailable({
+            kind: "no_quota",
+            detail: `账号「${this.account.label}」尚未登录。`,
+          });
+        }
         const acpIndex = launch.args.indexOf("acp");
         if (acpIndex < 0)
           throw new Error(
             "Antigravity launch does not contain the acp subcommand",
           );
+        const commandArgs = [
+          ...launch.args.slice(0, acpIndex),
+          "-p",
+          "/usage",
+          "--output-format",
+          "json",
+        ];
+        const runUsage = (env: Record<string, string>) =>
+          execCommand(launch.command, commandArgs, {
+            env,
+            timeout: 25_000,
+            maxBuffer: 1024 * 1024,
+          });
         let result;
         try {
-          result = await execCommand(
-            launch.command,
-            [
-              ...launch.args.slice(0, acpIndex),
-              "-p",
-              "/usage",
-              "--output-format",
-              "json",
-            ],
-            {
-              env: launch.env,
-              timeout: 18_000,
-              maxBuffer: 1024 * 1024,
-            },
-          );
+          result = this.account
+            ? await withIsolatedUsageHome(
+                launch.env,
+                this.account.profileDir,
+                runUsage,
+              )
+            : await runUsage(launch.env);
         } catch {
           throw new Error(
             "Antigravity usage command failed or timed out. Check that agy is signed in.",
@@ -170,7 +272,9 @@ export class Usage {
                 summary: !bucket.disabled && bucket.window === "weekly",
                 utilizationPct: used,
                 durationSeconds: windowDurationSeconds(bucket.window),
-                resetsAt: bucket.disabled ? null : bucket.reset_time,
+                resetsAt: bucket.disabled
+                  ? null
+                  : normalizeResetTime(bucket.reset_time),
                 tone: used === null ? "default" : toneFromUsedPct(used),
               }),
             ];
