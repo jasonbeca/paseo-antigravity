@@ -120,7 +120,7 @@ test("prepareAccountProfile links global rules/skills without linking tokens or 
   }
 });
 
-test("buildAccountEnv preserves HOME, injects GEMINI_HOME + SSH_CONNECTION, and strips ambient keys", () => {
+test("buildAccountEnv preserves HOME, injects GEMINI_HOME + AGY_CLI_FORCE_FILE_TOKEN_STORAGE, and strips ambient keys", () => {
   const env = buildAccountEnv(
     {
       HOME: "/Users/alice",
@@ -128,6 +128,8 @@ test("buildAccountEnv preserves HOME, injects GEMINI_HOME + SSH_CONNECTION, and 
       GEMINI_API_KEY: "ambient-key",
       GOOGLE_API_KEY: "ambient-google",
       GEMINI_HOME: "/old/gemini",
+      ANTIGRAVITY_GEMINI_DIR: "/old/agy-gemini",
+      AGY_CLI_FORCE_FILE_TOKEN_STORAGE: "0",
     },
     "/tmp/profile-work",
   );
@@ -135,10 +137,12 @@ test("buildAccountEnv preserves HOME, injects GEMINI_HOME + SSH_CONNECTION, and 
   assert.equal(env.PATH, "/usr/bin");
   assert.equal(env.GEMINI_HOME, path.resolve("/tmp/profile-work"));
   assert.equal(env.SSH_CONNECTION, "127.0.0.1 0 127.0.0.1 0");
+  assert.equal(env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE, "1");
   assert.equal(env.AGY_ACP_FORCE_FILE_STORAGE, "1");
   assert.equal(env.AGY_CLI_DISABLE_AUTO_UPDATE, "1");
   assert.equal(env.GEMINI_API_KEY, undefined);
   assert.equal(env.GOOGLE_API_KEY, undefined);
+  assert.equal(env.ANTIGRAVITY_GEMINI_DIR, undefined);
 });
 
 test("extractAuthorizationCode and parseOfficialAuthUrl validate inputs strictly", () => {

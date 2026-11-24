@@ -49,7 +49,9 @@ const REMOVED_ENV_KEYS = new Set([
   "ANTIGRAVITY_APP_DATA_DIR",
   "ANTIGRAVITY_LS_ADDRESS",
   "AGY_ACP_FORCE_FILE_STORAGE",
+  "AGY_CLI_FORCE_FILE_TOKEN_STORAGE",
   "AGY_CLI_DISABLE_AUTO_UPDATE",
+  "ANTIGRAVITY_GEMINI_DIR",
 ]);
 
 /** Non-credential global user files and skill dirs to link from ~/.gemini. */
@@ -340,10 +342,12 @@ export function buildAccountEnv(
     if (REMOVED_ENV_KEYS.has(key.toUpperCase())) continue;
     env[key] = value;
   }
-  // agy 1.5.x ignores AGY_ACP_FORCE_FILE_STORAGE unless it believes it runs over SSH,
-  // falling back to a single OS keyring entry otherwise (same mechanism as T3 Code).
+  // agy 1.5.16+ requires AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 to store OAuth tokens in the
+  // profile directory instead of the single OS keyring entry; keep SSH_CONNECTION and
+  // AGY_ACP_FORCE_FILE_STORAGE as well for older 1.5.x builds.
   env.SSH_CONNECTION = baseEnv.SSH_CONNECTION || DEFAULT_SSH_CONNECTION;
   env.GEMINI_HOME = path.resolve(profileDir);
+  env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE = "1";
   env.AGY_ACP_FORCE_FILE_STORAGE = "1";
   env.AGY_CLI_DISABLE_AUTO_UPDATE = "1";
   return env;
