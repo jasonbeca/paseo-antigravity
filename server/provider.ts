@@ -76,6 +76,7 @@ export function provider(
     command: account
       ? accountAcpCommand(account.profileDir)
       : ["agy", "acp", "--disable-telemetry"],
+    catalogRefresh: "on_demand",
     docsUrl: "https://paseo.sh/docs/supported-providers/antigravity",
     ...(account
       ? {

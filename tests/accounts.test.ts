@@ -30,7 +30,6 @@ import {
   parseOfficialAuthUrl,
 } from "../server/login.ts";
 import { provider } from "../server/provider.ts";
-import { Usage } from "../server/usage.ts";
 
 const fixture = fileURLToPath(new URL("./fixture.mjs", import.meta.url));
 
@@ -241,7 +240,7 @@ rl.once("line", (code) => {
   }
 });
 
-test("account provider status, catalog cache key, and usage source stay isolated per account", async () => {
+test("account provider status and catalog cache key stay isolated per account", async () => {
   const rootDir = makeTempDir("paseo-agy-prov-");
   const fakeHome = makeTempDir("paseo-agy-prov-home-");
   try {
@@ -250,17 +249,15 @@ test("account provider status, catalog cache key, and usage source stay isolated
       { rootDir, userHome: fakeHome },
     );
     const p = provider({ account, userHome: fakeHome });
-    const u = new Usage(account).registration();
 
     assert.equal(p.id, "better-paseo-antigravity-work");
     assert.equal(p.label, "Better Paseo Antigravity (Work)");
-    assert.equal(u.id, p.id);
-    assert.equal(u.provider, p.id);
+    assert.equal(p.catalogRefresh, "on_demand");
 
     const keyBefore = await p.getCatalogCacheKey!({ scope: "global" });
     assert.match(keyBefore!, /signed-out/);
 
-    // Signed out: status fails fast with guidance, usage discovers nothing
+    // Signed out: status fails fast with guidance
     const launch = {
       command: process.execPath,
       args: [fixture, "acp"],
@@ -269,7 +266,6 @@ test("account provider status, catalog cache key, and usage source stay isolated
     const statusOut = await p.status!({ launch });
     assert.equal(statusOut.available, false);
     assert.match(statusOut.diagnostic!, /尚未登录/);
-    assert.deepEqual(await u.discover({ kind: "global", launch }), []);
 
     // Simulate sign-in
     writeFileSync(accountTokenPath(account.profileDir), '{"token":{"access_token":"ok"}}');
@@ -280,101 +276,6 @@ test("account provider status, catalog cache key, and usage source stay isolated
     const statusIn = await p.status!({ launch });
     assert.equal(statusIn.available, true);
     assert.match(statusIn.diagnostic!, /独立账号配置：Work/);
-
-    const discovered = await u.discover({ kind: "global", launch });
-    assert.equal(discovered.length, 1);
-    assert.equal(discovered[0]?.label, "Work");
-    const report = await u.fetch(discovered[0]!.input);
-    assert.equal(report.status, "available");
-
-    // Account usage key differs from default provider usage key
-    const defaultUsage = new Usage().registration();
-    const defaultDiscovered = await defaultUsage.discover({ kind: "global", launch });
-    assert.equal(defaultDiscovered.length, 1);
-    assert.notEqual(discovered[0]!.key, defaultDiscovered[0]!.key);
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-    rmSync(fakeHome, { recursive: true, force: true });
-  }
-});
-
-test("multi-account usage isolates HOME per account for print-mode agy /usage and normalizes epoch-0 resets", async () => {
-  const rootDir = makeTempDir("paseo-agy-usage-iso-");
-  const fakeHome = makeTempDir("paseo-agy-usage-home-");
-  try {
-    const work = addAccountRecord(
-      { id: "work", label: "Work" },
-      { rootDir, userHome: fakeHome },
-    );
-    const personal = addAccountRecord(
-      { id: "personal", label: "Personal" },
-      { rootDir, userHome: fakeHome },
-    );
-
-    // Put distinct tokens in each profile, and a decoy token in real ~/.gemini
-    writeFileSync(
-      accountTokenPath(work.profileDir),
-      JSON.stringify({ token: { access_token: "work", remaining_fraction: 0.8 } }),
-    );
-    writeFileSync(
-      accountTokenPath(personal.profileDir),
-      JSON.stringify({ token: { access_token: "personal", remaining_fraction: 0.25 } }),
-    );
-    mkdirSync(path.join(fakeHome, ".gemini", APP_DATA_DIR_NAME), { recursive: true });
-    writeFileSync(
-      path.join(fakeHome, ".gemini", APP_DATA_DIR_NAME, "antigravity-oauth-token"),
-      JSON.stringify({ token: { access_token: "default", remaining_fraction: 0.1 } }),
-    );
-
-    const baseLaunch = {
-      command: process.execPath,
-      args: [fixture, "acp"],
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: fakeHome,
-        SCENARIO: "strict-home-usage",
-        XDG_CONFIG_HOME: path.join(fakeHome, ".config"),
-        ANTIGRAVITY_HOME: path.join(fakeHome, ".gemini", APP_DATA_DIR_NAME),
-        ANTIGRAVITY_APP_DATA_DIR: path.join(fakeHome, ".gemini", APP_DATA_DIR_NAME),
-        ANTIGRAVITY_LS_ADDRESS: "localhost:9999",
-      },
-    };
-
-    const workUsage = new Usage(work).registration();
-    const personalUsage = new Usage(personal).registration();
-
-    const [workDiscovered, personalDiscovered] = await Promise.all([
-      workUsage.discover({ kind: "global", launch: baseLaunch }),
-      personalUsage.discover({ kind: "global", launch: baseLaunch }),
-    ]);
-    assert.equal(workDiscovered.length, 1);
-    assert.equal(personalDiscovered.length, 1);
-    assert.equal(workDiscovered[0]?.provider, work.providerId);
-    assert.equal(personalDiscovered[0]?.provider, personal.providerId);
-
-    const [workReport, personalReport] = await Promise.all([
-      workUsage.fetch(workDiscovered[0]!.input),
-      personalUsage.fetch(personalDiscovered[0]!.input),
-    ]);
-
-    assert.equal(workReport.status, "available");
-    assert.equal(personalReport.status, "available");
-    if (workReport.status === "available" && personalReport.status === "available") {
-      const workGemini = workReport.windows.find((w) => w.id === "gemini-weekly");
-      const work3p = workReport.windows.find((w) => w.id === "3p-weekly");
-      const personalGemini = personalReport.windows.find((w) => w.id === "gemini-weekly");
-
-      assert.equal(Math.round(workGemini!.usedPct!), 20);
-      assert.equal(workGemini!.resetsAt, "2026-12-01T00:00:00Z");
-      assert.equal(work3p!.usedPct, 0);
-      assert.equal(work3p!.resetsAt, null);
-
-      assert.equal(Math.round(personalGemini!.usedPct!), 75);
-    }
-
-    // Real profile tokens remain intact after synthetic HOME cleanup
-    assert.equal(isAccountSignedIn(work.profileDir), true);
-    assert.equal(isAccountSignedIn(personal.profileDir), true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(fakeHome, { recursive: true, force: true });

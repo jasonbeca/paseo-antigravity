@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { provider } from "../server/provider.ts";
-import { Usage } from "../server/usage.ts";
 const fixture = fileURLToPath(new URL("./fixture.mjs", import.meta.url));
 const launch = (scenario = "") => ({
   command: process.execPath,
@@ -45,45 +44,11 @@ test("status timeout remains bounded and reports the failed phase", async () => 
 });
 test("installation inspect preserves custom prefix without acp", async () => {
   const p = provider();
+  assert.equal(p.catalogRefresh, "on_demand");
   const result = await p.installation!.inspect!({
     launch: { ...launch(), args: [fixture], resolved: true },
     signal: new AbortController().signal,
   });
   assert.equal(result.status, "installed");
   if (result.status === "installed") assert.equal(result.version, "1.5.15");
-});
-test("Plugin usage source discovers account and parses official usage format", async () => {
-  const s = new Usage().registration();
-  const p = provider();
-  assert.equal(p.id, "better-paseo-antigravity");
-  assert.equal(p.label, "Better Paseo Antigravity");
-  assert.equal(s.id, p.id);
-  assert.equal(s.provider, p.id);
-  assert.equal(s.label, p.label);
-  const accounts = await s.discover({ kind: "global", launch: launch() });
-  assert.equal(accounts.length, 1);
-  const result = await s.fetch(accounts[0]!.input);
-  assert.equal(result.status, "available");
-  if (result.status === "available") {
-    assert.equal(result.windows.length, 1);
-    assert.equal(result.windows[0]?.usedPct, 25);
-  }
-  assert.equal(
-    (await s.discover({
-      kind: "session",
-      provider: p.id,
-      env: {},
-      launch: launch(),
-    })).length,
-    1,
-  );
-  assert.deepEqual(
-    await s.discover({
-      kind: "session",
-      provider: "antigravity-plus",
-      env: {},
-      launch: launch(),
-    }),
-    [],
-  );
 });

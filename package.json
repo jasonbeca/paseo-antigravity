@@ -9,7 +9,7 @@
     "test:live": "node --import tsx scripts/live.ts"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.17.3",
+    "@getpaseo/plugin": "0.18.0",
     "@types/node": "^24",
     "@types/react": "~19.2.0",
     "react": "19.2.3",

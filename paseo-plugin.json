@@ -1,14 +1,14 @@
 {
   "id": "better-paseo-antigravity",
   "name": "Better Paseo Antigravity",
-  "description": "Reliable Antigravity CLI (agy acp) provider and usage source with progress notices, bounded cancellation, process-group cleanup, and byte-aware history replay.",
+  "description": "Reliable Antigravity CLI (agy acp) provider with multi-account isolation, progress notices, bounded cancellation, process-group cleanup, and byte-aware history replay.",
   "translations": {
     "zh-CN": {
       "name": "Better Paseo Antigravity",
-      "description": "更可靠的 Antigravity CLI（agy acp）Provider 与用量数据源，提供进度提示、有界取消、进程组清理与字节级历史回放保护。"
+      "description": "更可靠的 Antigravity CLI（agy acp）Provider，支持多账号隔离、进度提示、有界取消、进程组清理与字节级历史回放保护。"
     }
   },
   "requirements": {
-    "paseo": ">=0.17.3 <0.18.0"
+    "paseo": ">=0.18.0"
   }
 }
