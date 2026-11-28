@@ -308,12 +308,56 @@ export function AccountsSettings({ theme, layout }: PluginSurfaceProps) {
     setBusyId(`usage:${id}`);
     try {
       const result = await refreshUsage({ id });
-      toast.show(`已刷新「${label}」额度：${result.summary}`, {
-        variant: "success",
-      });
+      if (result.fromCache) {
+        toast.show(
+          `「${label}」60 秒冷却中，已复用缓存（${result.summary}，约 ${result.cooldownRemainingSec ?? 1}s 后可重刷）`,
+          { variant: "info" },
+        );
+      } else {
+        toast.show(`已刷新「${label}」额度：${result.summary}`, {
+          variant: "success",
+        });
+      }
       await refresh();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : `刷新「${label}」额度失败。`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRefreshAllUsage = async () => {
+    const targets: Array<{ id: string; label: string }> = [
+      { id: "default", label: "默认账号" },
+      ...accounts
+        .filter((account) => account.signedIn)
+        .map((account) => ({ id: account.id, label: account.label })),
+    ];
+    setBusyId("usage:__all__");
+    let okCount = 0;
+    let cachedCount = 0;
+    let failCount = 0;
+    try {
+      // Refresh sequentially to avoid spawning multiple agy processes at once.
+      for (const target of targets) {
+        try {
+          const result = await refreshUsage({ id: target.id });
+          if (result.fromCache) cachedCount += 1;
+          else okCount += 1;
+        } catch {
+          failCount += 1;
+        }
+      }
+      const parts = [
+        okCount > 0 ? `刷新 ${okCount} 个` : null,
+        cachedCount > 0 ? `冷却复用 ${cachedCount} 个` : null,
+        failCount > 0 ? `失败 ${failCount} 个` : null,
+      ].filter(Boolean);
+      toast.show(
+        `批量刷新完成（${parts.join("，")}）。请到 Usage 面板点击 ↻ 查看最新进度条。`,
+        { variant: failCount > 0 ? "info" : "success" },
+      );
+      await refresh();
     } finally {
       setBusyId(null);
     }
@@ -364,6 +408,16 @@ export function AccountsSettings({ theme, layout }: PluginSurfaceProps) {
               >
                 <Text style={styles.buttonText}>
                   {busyId === "usage:default" ? "刷新中..." : "刷新额度"}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                disabled={busyId !== null}
+                onPress={() => void handleRefreshAllUsage()}
+                style={styles.primaryButton}
+              >
+                <Text style={styles.primaryButtonText}>
+                  {busyId === "usage:__all__" ? "逐个刷新中..." : "刷新全部已登录账号"}
                 </Text>
               </Pressable>
             </View>

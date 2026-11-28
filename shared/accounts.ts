@@ -128,5 +128,7 @@ export const refreshAccountUsageRpc = defineRpc({
     refreshed: z.boolean(),
     fetchedAt: z.string(),
     summary: z.string(),
+    fromCache: z.boolean().optional(),
+    cooldownRemainingSec: z.number().optional(),
   }),
 });

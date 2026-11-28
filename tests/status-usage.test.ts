@@ -75,10 +75,22 @@ test("Plugin usage source only reads cache in fetch and updates on manual refres
     const before = await s.fetch(accounts[0]!.input);
     assert.equal(before.status, "unavailable");
 
-    // Manual refresh runs agy -p /usage once and writes persistent cache
-    const refreshed = await usage.refreshNow();
+    // Manual refresh runs agy -p /usage once and writes persistent cache;
+    // concurrent clicks share the single in-flight promise.
+    const [refreshed, concurrent] = await Promise.all([
+      usage.refreshNow(),
+      usage.refreshNow(),
+    ]);
     assert.equal(refreshed.report.status, "available");
+    assert.equal(refreshed.fromCache, false);
+    assert.equal(concurrent.fetchedAt, refreshed.fetchedAt);
     assert.match(refreshed.summary, /25%/);
+
+    // Repeating within 60s cooldown returns cached result without spawning agy
+    const cooled = await usage.refreshNow();
+    assert.equal(cooled.fromCache, true);
+    assert.equal(cooled.fetchedAt, refreshed.fetchedAt);
+    assert.ok((cooled.cooldownRemainingSec ?? 0) >= 1);
 
     // Subsequent fetch reads cached report without spawning agy
     const result = await s.fetch(accounts[0]!.input);

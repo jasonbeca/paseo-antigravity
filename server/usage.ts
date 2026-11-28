@@ -34,6 +34,7 @@ import {
 
 const USAGE_CACHE_FILENAME = "paseo-usage-cache.json";
 const DEFAULT_USAGE_CACHE_FILENAME = "default-usage-cache.json";
+export const DEFAULT_REFRESH_COOLDOWN_MS = 60_000;
 
 const input = z.object({ cachePath: z.string().min(1) }).strict();
 
@@ -229,14 +230,29 @@ async function withIsolatedUsageHome<T>(
   }
 }
 
+export interface RefreshUsageResult {
+  readonly fetchedAt: string;
+  readonly report: UsageReport;
+  readonly summary: string;
+  readonly fromCache: boolean;
+  readonly cooldownRemainingSec?: number;
+}
+
 export class Usage {
   private lastLaunch?: ProviderLaunch;
+  private inFlight?: Promise<RefreshUsageResult>;
   private readonly account?: AccountProfile;
   private readonly userHome: string;
+  private readonly cooldownMs: number;
 
-  constructor(account?: AccountProfile, userHome = homedir()) {
+  constructor(
+    account?: AccountProfile,
+    userHome = homedir(),
+    cooldownMs = DEFAULT_REFRESH_COOLDOWN_MS,
+  ) {
     this.account = account;
     this.userHome = userHome;
+    this.cooldownMs = cooldownMs;
   }
 
   cachePath(): string {
@@ -251,16 +267,53 @@ export class Usage {
 
   /**
    * Explicitly invoked only when the user clicks "刷新额度" in plugin settings.
-   * Never triggered by Paseo's automatic 5-minute background usage polling.
+   * Deduplicates concurrent clicks (in-flight lock) and enforces a 60s cooldown
+   * so accidental rapid clicks never spawn duplicate `agy -p /usage` processes.
    */
-  async refreshNow(explicitLaunch?: ProviderLaunch): Promise<{
-    fetchedAt: string;
-    report: UsageReport;
-    summary: string;
-  }> {
+  async refreshNow(explicitLaunch?: ProviderLaunch): Promise<RefreshUsageResult> {
     if (this.account && !isAccountSignedIn(this.account.profileDir)) {
       throw new Error(`账号「${this.account.label}」尚未登录，请先完成官方授权。`);
     }
+
+    if (this.inFlight) {
+      return await this.inFlight;
+    }
+
+    const cached = this.readCached();
+    if (cached && cached.windows.length > 0 && this.cooldownMs > 0) {
+      const fetchedMs = Date.parse(cached.fetchedAt);
+      const elapsed = Number.isFinite(fetchedMs) ? Date.now() - fetchedMs : Infinity;
+      if (elapsed >= 0 && elapsed < this.cooldownMs) {
+        const cooldownRemainingSec = Math.max(
+          1,
+          Math.ceil((this.cooldownMs - elapsed) / 1000),
+        );
+        return {
+          fetchedAt: cached.fetchedAt,
+          report: {
+            status: "available",
+            observedAt: cached.fetchedAt,
+            windows: cached.windows,
+          },
+          summary: formatSummaryText(cached.windows),
+          fromCache: true,
+          cooldownRemainingSec,
+        };
+      }
+    }
+
+    const run = this.executeRefresh(explicitLaunch).finally(() => {
+      if (this.inFlight === run) {
+        this.inFlight = undefined;
+      }
+    });
+    this.inFlight = run;
+    return await run;
+  }
+
+  private async executeRefresh(
+    explicitLaunch?: ProviderLaunch,
+  ): Promise<RefreshUsageResult> {
 
     const baseEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -351,6 +404,7 @@ export class Usage {
       fetchedAt,
       report: { status: "available", observedAt: fetchedAt, windows },
       summary: formatSummaryText(windows),
+      fromCache: false,
     };
   }
 

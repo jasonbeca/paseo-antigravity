@@ -135,13 +135,18 @@ export default function contribute(server: PluginServerContext) {
         const account = loadAccountProfilesSync().find((entry) => entry.id === id);
         if (!account) throw new Error(`未找到账号「${id}」。`);
         usage = new Usage(account);
+        usageById.set(id, usage);
       }
     }
     const result = await usage.refreshNow();
     return {
-      refreshed: true,
+      refreshed: !result.fromCache,
       fetchedAt: result.fetchedAt,
       summary: result.summary,
+      fromCache: result.fromCache,
+      ...(result.cooldownRemainingSec !== undefined
+        ? { cooldownRemainingSec: result.cooldownRemainingSec }
+        : {}),
     };
   });
 
