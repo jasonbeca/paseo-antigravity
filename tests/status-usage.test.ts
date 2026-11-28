@@ -1,11 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { provider } from "../server/provider.ts";
-import { Usage, parseStatusLineUsageSnapshot } from "../server/usage.ts";
+import { Usage } from "../server/usage.ts";
 const fixture = fileURLToPath(new URL("./fixture.mjs", import.meta.url));
 const launch = (scenario = "") => ({
   command: process.execPath,
@@ -56,78 +53,38 @@ test("installation inspect preserves custom prefix without acp", async () => {
   assert.equal(result.status, "installed");
   if (result.status === "installed") assert.equal(result.version, "1.5.15");
 });
-test("StatusLine usage source reads local statusline-usage.json without running agy", async () => {
-  const fakeHome = mkdtempSync(path.join(tmpdir(), "paseo-agy-sl-usage-"));
-  try {
-    const p = provider();
-    const s = new Usage(undefined, fakeHome).registration();
-    assert.equal(s.id, p.id);
-    assert.equal(s.provider, p.id);
-    assert.equal(s.label, p.label);
-
-    const accounts = await s.discover({ kind: "global" });
-    assert.equal(accounts.length, 1);
-
-    // Missing file returns unavailable with guidance
-    const missing = await s.fetch(accounts[0]!.input);
-    assert.equal(missing.status, "unavailable");
-
-    // Write captured statusline snapshot
-    const appDir = path.join(fakeHome, ".gemini", "antigravity-cli");
-    mkdirSync(appDir, { recursive: true });
-    writeFileSync(
-      path.join(appDir, "statusline-usage.json"),
-      JSON.stringify({
-        captured_at: "2026-11-28T01:00:00.000Z",
-        data: {
-          quota: {
-            five_hour: { remaining_fraction: 0.75, reset_in_seconds: 3600 },
-            weekly: { remaining_fraction: 0.4, reset_time: "2026-12-04T00:00:00Z" },
-          },
-        },
-      }),
-    );
-
-    const result = await s.fetch(accounts[0]!.input);
-    assert.equal(result.status, "available");
-    if (result.status === "available") {
-      assert.equal(result.observedAt, "2026-11-28T01:00:00.000Z");
-      assert.equal(result.windows.length, 2);
-      const fiveH = result.windows.find((w) => w.id === "five_hour");
-      const weekly = result.windows.find((w) => w.id === "weekly");
-      assert.equal(Math.round(fiveH!.usedPct!), 25);
-      assert.equal(fiveH!.resetsAt, "2026-11-28T02:00:00.000Z");
-      assert.equal(Math.round(weekly!.usedPct!), 60);
-      assert.equal(weekly!.summary, true);
-      assert.equal(weekly!.resetsAt, "2026-12-04T00:00:00.000Z");
-    }
-
-    // Also supports rate_limits fallback format
-    const rl = parseStatusLineUsageSnapshot(
-      {
-        rate_limits: {
-          five_hour: { used_percentage: 30, resets_at: 1795831200 },
-          seven_day: { used_percentage: 55, resets_at: 1796436000 },
-        },
-      },
-      new Date("2026-11-28T01:00:00.000Z"),
-    );
-    assert.equal(rl.status, "available");
-    if (rl.status === "available") {
-      assert.equal(rl.windows.length, 2);
-      assert.equal(rl.windows[0]?.usedPct, 30);
-      assert.equal(rl.windows[1]?.usedPct, 55);
-    }
-
-    assert.equal(
-      (await s.discover({ kind: "session", provider: p.id, env: {} })).length,
-      1,
-    );
-    assert.deepEqual(
-      await s.discover({ kind: "session", provider: "other-provider", env: {} }),
-      [],
-    );
-  } finally {
-    rmSync(fakeHome, { recursive: true, force: true });
+test("Plugin usage source discovers account and parses official usage format", async () => {
+  const s = new Usage().registration();
+  const p = provider();
+  assert.equal(p.id, "better-paseo-antigravity");
+  assert.equal(p.label, "Better Paseo Antigravity");
+  assert.equal(s.id, p.id);
+  assert.equal(s.provider, p.id);
+  assert.equal(s.label, p.label);
+  const accounts = await s.discover({ kind: "global", launch: launch() });
+  assert.equal(accounts.length, 1);
+  const result = await s.fetch(accounts[0]!.input);
+  assert.equal(result.status, "available");
+  if (result.status === "available") {
+    assert.equal(result.windows.length, 1);
+    assert.equal(result.windows[0]?.usedPct, 25);
   }
+  assert.equal(
+    (await s.discover({
+      kind: "session",
+      provider: p.id,
+      env: {},
+      launch: launch(),
+    })).length,
+    1,
+  );
+  assert.deepEqual(
+    await s.discover({
+      kind: "session",
+      provider: "antigravity-plus",
+      env: {},
+      launch: launch(),
+    }),
+    [],
+  );
 });
