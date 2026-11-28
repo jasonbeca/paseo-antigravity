@@ -26,6 +26,7 @@ import {
 
 export const APP_DATA_DIR_NAME = "antigravity-cli";
 export const OAUTH_TOKEN_FILENAME = "antigravity-oauth-token";
+export const STATUSLINE_USAGE_FILENAME = "statusline-usage.json";
 const DEFAULT_SSH_CONNECTION = "127.0.0.1 0 127.0.0.1 0";
 
 /**
@@ -111,6 +112,10 @@ export function accountProfileDir(
 
 export function accountTokenPath(profileDir: string): string {
   return path.join(profileDir, APP_DATA_DIR_NAME, OAUTH_TOKEN_FILENAME);
+}
+
+export function accountStatuslineUsagePath(profileDir: string): string {
+  return path.join(profileDir, APP_DATA_DIR_NAME, STATUSLINE_USAGE_FILENAME);
 }
 
 export function toAccountProfile(
@@ -264,6 +269,52 @@ export function prepareAccountProfile(
     const target = path.join(realGeminiDir, ...entry.segments);
     const link = path.join(resolvedProfile, ...entry.segments);
     syncUserConfigSymlink(target, link, entry.kind);
+  }
+
+  ensureProfileStatusLineSettings(resolvedProfile, realGeminiDir);
+}
+
+function ensureProfileStatusLineSettings(
+  resolvedProfile: string,
+  realGeminiDir: string,
+): void {
+  const scriptPath = path.join(realGeminiDir, APP_DATA_DIR_NAME, "statusline.py");
+  try {
+    if (!statSync(scriptPath).isFile()) return;
+  } catch {
+    return;
+  }
+
+  const settingsPath = path.join(resolvedProfile, APP_DATA_DIR_NAME, "settings.json");
+  let parsed: Record<string, unknown> = {};
+  if (existsSync(settingsPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+      parsed = raw as Record<string, unknown>;
+      if (parsed.statusLine !== undefined) return;
+    } catch {
+      return;
+    }
+  }
+
+  const quotedScript = /\s/.test(scriptPath) ? JSON.stringify(scriptPath) : scriptPath;
+  const next = {
+    ...parsed,
+    statusLine: {
+      type: "command",
+      command: `python3 ${quotedScript}`,
+    },
+  };
+  try {
+    const tmp = `${settingsPath}.${randomUUID()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n", {
+      mode: 0o600,
+      flush: true,
+    });
+    renameSync(tmp, settingsPath);
+  } catch {
+    /* non-fatal */
   }
 }
 

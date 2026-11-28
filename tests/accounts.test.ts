@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readlinkSync,
   rmSync,
   unlinkSync,
@@ -15,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   APP_DATA_DIR_NAME,
+  accountStatuslineUsagePath,
   accountTokenPath,
   addAccountRecord,
   buildAccountEnv,
@@ -30,6 +32,7 @@ import {
   parseOfficialAuthUrl,
 } from "../server/login.ts";
 import { provider } from "../server/provider.ts";
+import { Usage } from "../server/usage.ts";
 
 const fixture = fileURLToPath(new URL("./fixture.mjs", import.meta.url));
 
@@ -276,6 +279,77 @@ test("account provider status and catalog cache key stay isolated per account", 
     const statusIn = await p.status!({ launch });
     assert.equal(statusIn.available, true);
     assert.match(statusIn.diagnostic!, /独立账号配置：Work/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test("multi-account statusline usage reads per-profile statusline-usage.json and configures settings.json", async () => {
+  const rootDir = makeTempDir("paseo-agy-sl-iso-");
+  const fakeHome = makeTempDir("paseo-agy-sl-home-");
+  try {
+    const realAppDir = path.join(fakeHome, ".gemini", APP_DATA_DIR_NAME);
+    mkdirSync(realAppDir, { recursive: true });
+    writeFileSync(path.join(realAppDir, "statusline.py"), "#!/usr/bin/env python3\n");
+
+    const work = addAccountRecord(
+      { id: "work", label: "Work" },
+      { rootDir, userHome: fakeHome },
+    );
+    const personal = addAccountRecord(
+      { id: "personal", label: "Personal" },
+      { rootDir, userHome: fakeHome },
+    );
+
+    // prepareAccountProfile should inject statusLine into profile settings.json
+    const workSettings = JSON.parse(
+      readFileSync(
+        path.join(work.profileDir, APP_DATA_DIR_NAME, "settings.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(workSettings.statusLine?.type, "command");
+    assert.match(workSettings.statusLine?.command, /statusline\.py/);
+
+    // Mark both accounts signed in and write distinct statusline-usage.json files
+    writeFileSync(accountTokenPath(work.profileDir), '{"token":{"access_token":"work"}}');
+    writeFileSync(accountTokenPath(personal.profileDir), '{"token":{"access_token":"personal"}}');
+    writeFileSync(
+      accountStatuslineUsagePath(work.profileDir),
+      JSON.stringify({
+        captured_at: "2026-11-28T01:00:00Z",
+        data: { quota: { weekly: { remaining_fraction: 0.8, reset_in_seconds: 86400 } } },
+      }),
+    );
+    writeFileSync(
+      accountStatuslineUsagePath(personal.profileDir),
+      JSON.stringify({
+        captured_at: "2026-11-28T01:05:00Z",
+        data: { quota: { weekly: { remaining_fraction: 0.25, reset_in_seconds: 86400 } } },
+      }),
+    );
+
+    const workUsage = new Usage(work, fakeHome).registration();
+    const personalUsage = new Usage(personal, fakeHome).registration();
+    const [wd, pd] = await Promise.all([
+      workUsage.discover({ kind: "global" }),
+      personalUsage.discover({ kind: "global" }),
+    ]);
+    assert.equal(wd.length, 1);
+    assert.equal(pd.length, 1);
+    assert.notEqual(wd[0]!.key, pd[0]!.key);
+
+    const [wr, pr] = await Promise.all([
+      workUsage.fetch(wd[0]!.input),
+      personalUsage.fetch(pd[0]!.input),
+    ]);
+    assert.equal(wr.status, "available");
+    assert.equal(pr.status, "available");
+    if (wr.status === "available" && pr.status === "available") {
+      assert.equal(Math.round(wr.windows[0]!.usedPct!), 20);
+      assert.equal(Math.round(pr.windows[0]!.usedPct!), 75);
+    }
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(fakeHome, { recursive: true, force: true });

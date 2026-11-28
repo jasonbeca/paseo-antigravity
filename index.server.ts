@@ -20,9 +20,11 @@ import {
 } from "./server/accounts";
 import { AccountLoginManager } from "./server/login";
 import { provider } from "./server/provider";
+import { Usage } from "./server/usage";
 
 export default function contribute(server: PluginServerContext) {
   // Default provider preserves existing single-account CLI login untouched.
+  server.registerUsageSource(new Usage().registration());
   server.registerProvider(provider());
 
   // Multi-account isolated instances (T3 Code pattern: GEMINI_HOME + --gemini-dir + SSH_CONNECTION).
@@ -34,6 +36,7 @@ export default function contribute(server: PluginServerContext) {
   ];
 
   for (const account of initialAccounts) {
+    server.registerUsageSource(new Usage(account).registration());
     server.registerProvider(provider({ account }));
   }
 
