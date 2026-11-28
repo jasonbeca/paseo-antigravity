@@ -5,6 +5,7 @@ import {
   cancelAccountLoginRpc,
   listAccountsRpc,
   logoutAccountRpc,
+  refreshAccountUsageRpc,
   removeAccountRpc,
   startAccountLoginRpc,
   submitAccountLoginCodeRpc,
@@ -20,11 +21,18 @@ import {
 } from "./server/accounts";
 import { AccountLoginManager } from "./server/login";
 import { provider } from "./server/provider";
-import { Usage } from "./server/usage";
+import {
+  Usage,
+  accountUsageCachePath,
+  readUsageCacheFile,
+} from "./server/usage";
 
 export default function contribute(server: PluginServerContext) {
   // Default provider preserves existing single-account CLI login untouched.
-  server.registerUsageSource(new Usage().registration());
+  const usageById = new Map<string, Usage>();
+  const defaultUsage = new Usage();
+  usageById.set("default", defaultUsage);
+  server.registerUsageSource(defaultUsage.registration());
   server.registerProvider(provider());
 
   // Multi-account isolated instances (T3 Code pattern: GEMINI_HOME + --gemini-dir + SSH_CONNECTION).
@@ -36,7 +44,9 @@ export default function contribute(server: PluginServerContext) {
   ];
 
   for (const account of initialAccounts) {
-    server.registerUsageSource(new Usage(account).registration());
+    const accountUsage = new Usage(account);
+    usageById.set(account.id, accountUsage);
+    server.registerUsageSource(accountUsage.registration());
     server.registerProvider(provider({ account }));
   }
 
@@ -44,6 +54,7 @@ export default function contribute(server: PluginServerContext) {
 
   const summarize = (account: AccountProfile): AccountSummary => {
     const login = loginManager.getState(account.id);
+    const cached = readUsageCacheFile(accountUsageCachePath(account.profileDir));
     return {
       id: account.id,
       label: account.label,
@@ -54,6 +65,7 @@ export default function contribute(server: PluginServerContext) {
       createdAt: account.createdAt,
       loginInProgress: login.loginInProgress,
       ...(login.authUrl ? { authUrl: login.authUrl } : {}),
+      ...(cached?.fetchedAt ? { usageUpdatedAt: cached.fetchedAt } : {}),
     };
   };
 
@@ -112,6 +124,25 @@ export default function contribute(server: PluginServerContext) {
   server.handle(cancelAccountLoginRpc, async ({ id }) => {
     const canceled = await loginManager.cancel(id);
     return { canceled };
+  });
+
+  server.handle(refreshAccountUsageRpc, async ({ id }) => {
+    let usage = usageById.get(id);
+    if (!usage) {
+      if (id === "default") {
+        usage = defaultUsage;
+      } else {
+        const account = loadAccountProfilesSync().find((entry) => entry.id === id);
+        if (!account) throw new Error(`未找到账号「${id}」。`);
+        usage = new Usage(account);
+      }
+    }
+    const result = await usage.refreshNow();
+    return {
+      refreshed: true,
+      fetchedAt: result.fetchedAt,
+      summary: result.summary,
+    };
   });
 
   return async () => {

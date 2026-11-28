@@ -1,4 +1,14 @@
-import { mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -9,18 +19,25 @@ import {
   toneFromUsedPct,
   unavailable,
   windowFromUsedPct,
+  type UsageReport,
   type UsageSourceRegistration,
+  type UsageWindow,
 } from "@getpaseo/plugin/server/usage";
 import { BASE_PROVIDER_ID, BASE_PROVIDER_LABEL } from "../shared/accounts";
 import {
   APP_DATA_DIR_NAME,
   buildAccountEnv,
+  defaultAccountsRootDir,
   isAccountSignedIn,
   type AccountProfile,
 } from "./accounts";
 
-const input = z.object({ launch: z.string() }).strict();
-const response = z.object({
+const USAGE_CACHE_FILENAME = "paseo-usage-cache.json";
+const DEFAULT_USAGE_CACHE_FILENAME = "default-usage-cache.json";
+
+const input = z.object({ cachePath: z.string().min(1) }).strict();
+
+const responseSchema = z.object({
   status: z.string(),
   error: z.string().optional(),
   response: z.string().optional(),
@@ -48,15 +65,63 @@ const response = z.object({
     .optional(),
 });
 
-function accountKey(env: ProviderLaunch["env"]): string {
-  return hashAccountKey(
-    path.resolve(
-      env.GEMINI_HOME
-        ? path.join(env.GEMINI_HOME, APP_DATA_DIR_NAME)
-        : (env.ANTIGRAVITY_HOME ??
-            path.join(env.HOME ?? homedir(), ".gemini", APP_DATA_DIR_NAME)),
-    ),
+const cachedWindowSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  shortLabel: z.string().optional(),
+  summary: z.boolean().optional(),
+  usedPct: z.number().nullable().optional(),
+  remainingPct: z.number().nullable().optional(),
+  resetsAt: z.string().nullable().optional(),
+  durationSeconds: z.number().optional(),
+  tone: z.enum(["default", "ok", "warning", "danger"]).optional(),
+});
+
+const cachedUsageFileSchema = z.object({
+  version: z.literal(1),
+  fetchedAt: z.string(),
+  windows: z.array(cachedWindowSchema),
+});
+
+export interface CachedUsageSnapshot {
+  readonly fetchedAt: string;
+  readonly windows: UsageWindow[];
+}
+
+export function accountUsageCachePath(profileDir: string): string {
+  return path.join(path.resolve(profileDir), APP_DATA_DIR_NAME, USAGE_CACHE_FILENAME);
+}
+
+export function defaultUsageCachePath(userHome = homedir()): string {
+  return path.join(defaultAccountsRootDir(userHome), DEFAULT_USAGE_CACHE_FILENAME);
+}
+
+export function readUsageCacheFile(filePath: string): CachedUsageSnapshot | undefined {
+  try {
+    const raw = readFileSync(filePath, "utf8");
+    const parsed = cachedUsageFileSchema.parse(JSON.parse(raw));
+    return {
+      fetchedAt: parsed.fetchedAt,
+      windows: parsed.windows,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function writeUsageCacheFile(
+  filePath: string,
+  snapshot: CachedUsageSnapshot,
+): void {
+  const dir = path.dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = `${filePath}.${randomUUID()}.tmp`;
+  writeFileSync(
+    tmp,
+    JSON.stringify({ version: 1, ...snapshot }, null, 2) + "\n",
+    { mode: 0o600, flush: true },
   );
+  renameSync(tmp, filePath);
 }
 
 function formatWindowLabel(name: string, window: string): string {
@@ -100,6 +165,14 @@ function normalizeResetTime(value: string | null | undefined): string | null {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
   return value;
+}
+
+function formatSummaryText(windows: readonly UsageWindow[]): string {
+  const parts = windows
+    .filter((w) => typeof w.usedPct === "number")
+    .slice(0, 4)
+    .map((w) => `${w.shortLabel || w.label} ${Math.round(w.usedPct!)}%`);
+  return parts.length > 0 ? parts.join(" · ") : "已更新";
 }
 
 const ISOLATED_USAGE_STRIPPED_ENV_KEYS = new Set([
@@ -157,11 +230,128 @@ async function withIsolatedUsageHome<T>(
 }
 
 export class Usage {
-  private readonly launches = new Map<string, ProviderLaunch>();
+  private lastLaunch?: ProviderLaunch;
   private readonly account?: AccountProfile;
+  private readonly userHome: string;
 
-  constructor(account?: AccountProfile) {
+  constructor(account?: AccountProfile, userHome = homedir()) {
     this.account = account;
+    this.userHome = userHome;
+  }
+
+  cachePath(): string {
+    return this.account
+      ? accountUsageCachePath(this.account.profileDir)
+      : defaultUsageCachePath(this.userHome);
+  }
+
+  readCached(): CachedUsageSnapshot | undefined {
+    return readUsageCacheFile(this.cachePath());
+  }
+
+  /**
+   * Explicitly invoked only when the user clicks "刷新额度" in plugin settings.
+   * Never triggered by Paseo's automatic 5-minute background usage polling.
+   */
+  async refreshNow(explicitLaunch?: ProviderLaunch): Promise<{
+    fetchedAt: string;
+    report: UsageReport;
+    summary: string;
+  }> {
+    if (this.account && !isAccountSignedIn(this.account.profileDir)) {
+      throw new Error(`账号「${this.account.label}」尚未登录，请先完成官方授权。`);
+    }
+
+    const baseEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined) baseEnv[k] = v;
+    }
+
+    const rawLaunch: ProviderLaunch = explicitLaunch ??
+      this.lastLaunch ?? {
+        command: "agy",
+        args: ["acp"],
+        env: baseEnv,
+      };
+
+    const launch: ProviderLaunch = this.account
+      ? {
+          ...rawLaunch,
+          env: buildAccountEnv(rawLaunch.env, this.account.profileDir),
+        }
+      : rawLaunch;
+
+    const acpIndex = launch.args.indexOf("acp");
+    const prefix = acpIndex < 0 ? launch.args : launch.args.slice(0, acpIndex);
+    const commandArgs = [...prefix, "-p", "/usage", "--output-format", "json"];
+
+    const runUsage = (env: Record<string, string>) =>
+      execCommand(launch.command, commandArgs, {
+        env,
+        timeout: 25_000,
+        maxBuffer: 1024 * 1024,
+      });
+
+    let result;
+    try {
+      result = this.account
+        ? await withIsolatedUsageHome(launch.env, this.account.profileDir, runUsage)
+        : await runUsage(launch.env);
+    } catch {
+      throw new Error("查询额度失败或超时，请检查 agy CLI 是否已登录且网络正常。");
+    }
+
+    const data = responseSchema.parse(JSON.parse(result.stdout));
+    if (data.status !== "SUCCESS") {
+      throw new Error(
+        data.error || data.response || `agy usage returned ${data.status}`,
+      );
+    }
+    if (!data.command) throw new Error("agy 未返回额度数据。");
+
+    const groups = data.command.data.groups;
+    const includeGroup = groups.length > 1;
+    const windows = groups.flatMap((group) => {
+      const groupLabel = formatGroupLabel(group.name);
+      return group.buckets.flatMap((bucket) => {
+        if (!bucket.disabled && bucket.remaining_fraction == null) return [];
+        const used = bucket.disabled ? null : (1 - bucket.remaining_fraction!) * 100;
+        return [
+          windowFromUsedPct({
+            id: bucket.id,
+            label: [
+              groupLabel,
+              formatWindowLabel(bucket.name, bucket.window),
+              bucket.disabled ? "Disabled" : null,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+            shortLabel: formatShortLabel(
+              includeGroup ? groupLabel : "",
+              bucket.window,
+            ),
+            summary: !bucket.disabled && bucket.window === "weekly",
+            utilizationPct: used,
+            durationSeconds: windowDurationSeconds(bucket.window),
+            resetsAt: bucket.disabled ? null : normalizeResetTime(bucket.reset_time),
+            tone: used === null ? "default" : toneFromUsedPct(used),
+          }),
+        ];
+      });
+    });
+
+    if (windows.length === 0) {
+      throw new Error("agy 返回的额度分组为空。");
+    }
+
+    const fetchedAt = new Date().toISOString();
+    writeUsageCacheFile(this.cachePath(), { fetchedAt, windows });
+
+    return {
+      fetchedAt,
+      report: { status: "available", observedAt: fetchedAt, windows },
+      summary: formatSummaryText(windows),
+    };
   }
 
   registration(): UsageSourceRegistration {
@@ -174,119 +364,43 @@ export class Usage {
       input,
       provider: providerId,
       discover: async (scope) => {
-        if (scope.kind === "session" && scope.provider !== providerId)
-          return [];
-        if (!scope.launch) return [];
-        if (this.account && !isAccountSignedIn(this.account.profileDir))
-          return [];
-        const launch: ProviderLaunch = this.account
-          ? {
-              ...scope.launch,
-              env: buildAccountEnv(scope.launch.env, this.account.profileDir),
-            }
-          : scope.launch;
-        const key = accountKey(launch.env);
-        const locator = hashAccountKey(JSON.stringify(launch));
-        this.launches.set(locator, launch);
+        if (scope.kind === "session" && scope.provider !== providerId) return [];
+        if (this.account && !isAccountSignedIn(this.account.profileDir)) return [];
+        if (scope.launch) {
+          this.lastLaunch = scope.launch;
+        }
+        const cachePath = this.cachePath();
         return [
           {
-            key,
+            key: hashAccountKey(cachePath),
             provider: providerId,
             ...(this.account ? { label: this.account.label } : {}),
-            input: { launch: locator },
+            input: { cachePath },
           },
         ];
       },
+      // Pure disk-cache read: never runs `agy -p /usage` on background polling.
       fetch: async (value) => {
-        const { launch: locator } = input.parse(value);
-        const launch = this.launches.get(locator);
-        if (!launch) throw new Error("Antigravity launch no longer exists");
+        const { cachePath } = input.parse(value);
         if (this.account && !isAccountSignedIn(this.account.profileDir)) {
           return unavailable({
             kind: "no_quota",
             detail: `账号「${this.account.label}」尚未登录。`,
           });
         }
-        const acpIndex = launch.args.indexOf("acp");
-        if (acpIndex < 0)
-          throw new Error(
-            "Antigravity launch does not contain the acp subcommand",
-          );
-        const commandArgs = [
-          ...launch.args.slice(0, acpIndex),
-          "-p",
-          "/usage",
-          "--output-format",
-          "json",
-        ];
-        const runUsage = (env: Record<string, string>) =>
-          execCommand(launch.command, commandArgs, {
-            env,
-            timeout: 25_000,
-            maxBuffer: 1024 * 1024,
-          });
-        let result;
-        try {
-          result = this.account
-            ? await withIsolatedUsageHome(
-                launch.env,
-                this.account.profileDir,
-                runUsage,
-              )
-            : await runUsage(launch.env);
-        } catch {
-          throw new Error(
-            "Antigravity usage command failed or timed out. Check that agy is signed in.",
-          );
-        }
-        const data = response.parse(JSON.parse(result.stdout));
-        if (data.status !== "SUCCESS") {
-          throw new Error(
-            data.error || data.response || `agy usage returned ${data.status}`,
-          );
-        }
-        if (!data.command) throw new Error("agy did not return usage data");
-        const groups = data.command.data.groups;
-        const includeGroup = groups.length > 1;
-        const windows = groups.flatMap((group) => {
-          const groupLabel = formatGroupLabel(group.name);
-          return group.buckets.flatMap((bucket) => {
-            if (!bucket.disabled && bucket.remaining_fraction == null)
-              return [];
-            const used = bucket.disabled
-              ? null
-              : (1 - bucket.remaining_fraction!) * 100;
-            return [
-              windowFromUsedPct({
-                id: bucket.id,
-                label: [
-                  groupLabel,
-                  formatWindowLabel(bucket.name, bucket.window),
-                  bucket.disabled ? "Disabled" : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · "),
-                shortLabel: formatShortLabel(
-                  includeGroup ? groupLabel : "",
-                  bucket.window,
-                ),
-                summary: !bucket.disabled && bucket.window === "weekly",
-                utilizationPct: used,
-                durationSeconds: windowDurationSeconds(bucket.window),
-                resetsAt: bucket.disabled
-                  ? null
-                  : normalizeResetTime(bucket.reset_time),
-                tone: used === null ? "default" : toneFromUsedPct(used),
-              }),
-            ];
-          });
-        });
-        if (windows.length === 0)
+        const cached = readUsageCacheFile(cachePath);
+        if (!cached || cached.windows.length === 0) {
           return unavailable({
             kind: "no_quota",
-            detail: "No usage quota reported by agy",
+            detail:
+              "尚未手动刷新额度。请在「设置 → 插件 → Better Paseo Antigravity」中点击「刷新额度」。",
           });
-        return { status: "available", windows };
+        }
+        return {
+          status: "available",
+          observedAt: cached.fetchedAt,
+          windows: cached.windows,
+        };
       },
     };
   }

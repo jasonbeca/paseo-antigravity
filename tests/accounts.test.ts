@@ -325,8 +325,10 @@ test("multi-account usage isolates HOME per account for print-mode agy /usage an
       },
     };
 
-    const workUsage = new Usage(work).registration();
-    const personalUsage = new Usage(personal).registration();
+    const workUsageObj = new Usage(work, fakeHome);
+    const personalUsageObj = new Usage(personal, fakeHome);
+    const workUsage = workUsageObj.registration();
+    const personalUsage = personalUsageObj.registration();
 
     const [workDiscovered, personalDiscovered] = await Promise.all([
       workUsage.discover({ kind: "global", launch: baseLaunch }),
@@ -336,6 +338,13 @@ test("multi-account usage isolates HOME per account for print-mode agy /usage an
     assert.equal(personalDiscovered.length, 1);
     assert.equal(workDiscovered[0]?.provider, work.providerId);
     assert.equal(personalDiscovered[0]?.provider, personal.providerId);
+
+    // Before manual refresh: fetch returns unavailable and never runs agy
+    assert.equal((await workUsage.fetch(workDiscovered[0]!.input)).status, "unavailable");
+    assert.equal((await personalUsage.fetch(personalDiscovered[0]!.input)).status, "unavailable");
+
+    // Manual refresh populates isolated per-account caches
+    await Promise.all([workUsageObj.refreshNow(), personalUsageObj.refreshNow()]);
 
     const [workReport, personalReport] = await Promise.all([
       workUsage.fetch(workDiscovered[0]!.input),

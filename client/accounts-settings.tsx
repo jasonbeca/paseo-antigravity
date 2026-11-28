@@ -18,6 +18,7 @@ import {
   cancelAccountLoginRpc,
   listAccountsRpc,
   logoutAccountRpc,
+  refreshAccountUsageRpc,
   removeAccountRpc,
   startAccountLoginRpc,
   submitAccountLoginCodeRpc,
@@ -42,6 +43,7 @@ export function AccountsSettings({ theme, layout }: PluginSurfaceProps) {
   const startLogin = useRpc(startAccountLoginRpc);
   const submitCode = useRpc(submitAccountLoginCodeRpc);
   const cancelLogin = useRpc(cancelAccountLoginRpc);
+  const refreshUsage = useRpc(refreshAccountUsageRpc);
 
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [needsReload, setNeedsReload] = useState(false);
@@ -302,6 +304,21 @@ export function AccountsSettings({ theme, layout }: PluginSurfaceProps) {
     }
   };
 
+  const handleRefreshUsage = async (id: string, label: string) => {
+    setBusyId(`usage:${id}`);
+    try {
+      const result = await refreshUsage({ id });
+      toast.show(`已刷新「${label}」额度：${result.summary}`, {
+        variant: "success",
+      });
+      await refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : `刷新「${label}」额度失败。`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <View style={styles.root}>
       {needsReload ? (
@@ -324,7 +341,7 @@ export function AccountsSettings({ theme, layout }: PluginSurfaceProps) {
         <SettingsCard>
           <SettingsRow
             label="默认账号（Better Paseo Antigravity）"
-            hint="始终沿用本机原有 agy CLI 登录，不受下方独立账号影响。"
+            hint="始终沿用本机原有 agy CLI 登录，不受下方独立账号影响。额度仅在手动点击刷新时查询。"
           >
             <View style={styles.statusRow}>
               <View
@@ -337,6 +354,18 @@ export function AccountsSettings({ theme, layout }: PluginSurfaceProps) {
                   内置默认
                 </Text>
               </View>
+            </View>
+            <View style={styles.actionsRow}>
+              <Pressable
+                accessibilityRole="button"
+                disabled={busyId !== null}
+                onPress={() => void handleRefreshUsage("default", "默认账号")}
+                style={styles.button}
+              >
+                <Text style={styles.buttonText}>
+                  {busyId === "usage:default" ? "刷新中..." : "刷新额度"}
+                </Text>
+              </Pressable>
             </View>
           </SettingsRow>
 
@@ -416,14 +445,26 @@ export function AccountsSettings({ theme, layout }: PluginSurfaceProps) {
                     </Pressable>
 
                     {account.signedIn ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        disabled={isBusy}
-                        onPress={() => void handleLogout(account)}
-                        style={styles.button}
-                      >
-                        <Text style={styles.buttonText}>退出登录</Text>
-                      </Pressable>
+                      <>
+                        <Pressable
+                          accessibilityRole="button"
+                          disabled={busyId !== null}
+                          onPress={() => void handleRefreshUsage(account.id, account.label)}
+                          style={styles.button}
+                        >
+                          <Text style={styles.buttonText}>
+                            {busyId === `usage:${account.id}` ? "刷新中..." : "刷新额度"}
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          accessibilityRole="button"
+                          disabled={isBusy}
+                          onPress={() => void handleLogout(account)}
+                          style={styles.button}
+                        >
+                          <Text style={styles.buttonText}>退出登录</Text>
+                        </Pressable>
+                      </>
                     ) : null}
 
                     <Pressable

@@ -36,6 +36,7 @@ export const accountSummarySchema = z.object({
   createdAt: z.string(),
   loginInProgress: z.boolean(),
   authUrl: z.string().optional(),
+  usageUpdatedAt: z.string().optional(),
 });
 
 export type AccountSummary = z.infer<typeof accountSummarySchema>;
@@ -113,5 +114,19 @@ export const cancelAccountLoginRpc = defineRpc({
   input: z.object({ id: accountIdSchema }).strict(),
   output: z.object({
     canceled: z.boolean(),
+  }),
+});
+
+export const refreshAccountUsageRpc = defineRpc({
+  name: "accounts.usage.refresh",
+  input: z
+    .object({
+      id: z.union([z.literal("default"), accountIdSchema]),
+    })
+    .strict(),
+  output: z.object({
+    refreshed: z.boolean(),
+    fetchedAt: z.string(),
+    summary: z.string(),
   }),
 });

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { provider } from "../server/provider.ts";
 import { Usage } from "../server/usage.ts";
@@ -53,38 +56,58 @@ test("installation inspect preserves custom prefix without acp", async () => {
   assert.equal(result.status, "installed");
   if (result.status === "installed") assert.equal(result.version, "1.5.15");
 });
-test("Plugin usage source discovers account and parses official usage format", async () => {
-  const s = new Usage().registration();
-  const p = provider();
-  assert.equal(p.id, "better-paseo-antigravity");
-  assert.equal(p.label, "Better Paseo Antigravity");
-  assert.equal(s.id, p.id);
-  assert.equal(s.provider, p.id);
-  assert.equal(s.label, p.label);
-  const accounts = await s.discover({ kind: "global", launch: launch() });
-  assert.equal(accounts.length, 1);
-  const result = await s.fetch(accounts[0]!.input);
-  assert.equal(result.status, "available");
-  if (result.status === "available") {
-    assert.equal(result.windows.length, 1);
-    assert.equal(result.windows[0]?.usedPct, 25);
+test("Plugin usage source only reads cache in fetch and updates on manual refreshNow", async () => {
+  const fakeHome = mkdtempSync(path.join(tmpdir(), "paseo-agy-manual-usage-"));
+  try {
+    const usage = new Usage(undefined, fakeHome);
+    const s = usage.registration();
+    const p = provider();
+    assert.equal(p.id, "better-paseo-antigravity");
+    assert.equal(p.label, "Better Paseo Antigravity");
+    assert.equal(s.id, p.id);
+    assert.equal(s.provider, p.id);
+    assert.equal(s.label, p.label);
+
+    const accounts = await s.discover({ kind: "global", launch: launch() });
+    assert.equal(accounts.length, 1);
+
+    // Before manual refresh: fetch never runs agy and returns unavailable
+    const before = await s.fetch(accounts[0]!.input);
+    assert.equal(before.status, "unavailable");
+
+    // Manual refresh runs agy -p /usage once and writes persistent cache
+    const refreshed = await usage.refreshNow();
+    assert.equal(refreshed.report.status, "available");
+    assert.match(refreshed.summary, /25%/);
+
+    // Subsequent fetch reads cached report without spawning agy
+    const result = await s.fetch(accounts[0]!.input);
+    assert.equal(result.status, "available");
+    if (result.status === "available") {
+      assert.equal(result.observedAt, refreshed.fetchedAt);
+      assert.equal(result.windows.length, 1);
+      assert.equal(result.windows[0]?.usedPct, 25);
+    }
+
+    assert.equal(
+      (await s.discover({
+        kind: "session",
+        provider: p.id,
+        env: {},
+        launch: launch(),
+      })).length,
+      1,
+    );
+    assert.deepEqual(
+      await s.discover({
+        kind: "session",
+        provider: "antigravity-plus",
+        env: {},
+        launch: launch(),
+      }),
+      [],
+    );
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true });
   }
-  assert.equal(
-    (await s.discover({
-      kind: "session",
-      provider: p.id,
-      env: {},
-      launch: launch(),
-    })).length,
-    1,
-  );
-  assert.deepEqual(
-    await s.discover({
-      kind: "session",
-      provider: "antigravity-plus",
-      env: {},
-      launch: launch(),
-    }),
-    [],
-  );
 });
